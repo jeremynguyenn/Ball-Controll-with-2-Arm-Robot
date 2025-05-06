@@ -18,9 +18,7 @@ The technical report includes:
 - Future improvements and recommendations
 
 ## Video Demo
-![Demo Gif](./assets/gif/dual-arm-ball-setter-gif.gif)
-
-https://github.com/jeremynguyenn/Ball-Controll-with-2-Arm-Robot/blob/main/7DOF-2Arm%20robot%20control%20ball/assets/videos/dual-arm-ball-setter-demo.mp4
+![Demo Gif](https://github.com/jeremynguyenn/Ball-Controll-with-2-Arm-Robot/blob/main/7DOF-2Arm%20robot%20control%20ball/assets/gif/finalresult.gif)
 
 You can watch our full demonstration video showcasing the dual-arm volleyball setting action, including different scenarios and successful implementations of the task hierarchy system.
 
