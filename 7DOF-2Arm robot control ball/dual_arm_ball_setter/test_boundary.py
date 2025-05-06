@@ -1,0 +1,160 @@
+# Import the format for the condition number message
+from std_msgs.msg import Float64
+
+import rclpy
+import numpy as np
+
+from math import pi, sin, cos, acos, atan2, sqrt, fmod, exp
+
+# Grab the utilities
+from dual_arm_ball_setter.GeneratorNode      import GeneratorNode
+from hw5code.TransformHelpers   import *
+from hw5code.TrajectoryUtils    import *
+
+# Grab the general fkin from HW6 P1.
+from hw6code.KinematicChain     import KinematicChain
+import random
+
+#
+#   Trajectory Class
+#
+class Trajectory():
+    # Initialization.
+    def __init__(self, node):
+        # Set up the kinematic chain object.
+        self.chain_1 = KinematicChain(node, 'base', 'panda_1_hand', self.jointnames_1())
+        self.chain_2 = KinematicChain(node, 'base', 'panda_2_paddle', self.jointnames_2())
+        self.chain_to_hand_2 = KinematicChain(node, 'base', 'panda_2_hand', self.jointnames_2())
+
+        self.q0_1 = np.radians(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+        self.qdot0_1 = np.radians(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+
+        self.qd_1 = self.q0_1
+        self.lam_1 = 20
+        self.lam_s_1 = 5
+        self.gam_1 = 0.1
+
+        self.q0_2 = np.radians(np.array([0.0, np.deg2rad(46.5675), 0.0, np.deg2rad(-93.1349), 0.0, 0.0, np.deg2rad(46.5675)]))
+        self.p0_2 = np.array([0.0, 0.0, 1.5])
+        self.R0_2 = Reye()
+        
+        self.qd_2 = self.q0_2
+        self.lam_2 = 20
+        self.lam_s_2 = 5
+        self.gam_2 = 0.1
+        
+        # Drop ball in random location in 0.5 unit radius of base frame zero
+        (x,y) = (random.uniform(-0.05, 0.05), random.uniform(-0.05, 0.05))
+
+        self.pball = np.array([x, y, 5.0])
+        self.vball = np.array([0.0, 0.0, 0.0])
+        self.aball = np.array([0.0, 0.0, -9.81]) # Gravity -9.81
+
+        self.paddle_radius = 0.25
+
+    def jointnames(self):
+        # Combine joint names from both arms.
+        return self.jointnames_1() + self.jointnames_2() + ['panda_1_finger_joint1',
+                                      'panda_1_finger_joint2', 
+                                      'panda_2_finger_joint1',
+                                      'panda_2_finger_joint2']
+
+    # Declare the joint names for the first arm.
+    def jointnames_1(self):
+        return ['panda_1_joint1',
+                'panda_1_joint2',
+                'panda_1_joint3', 
+                'panda_1_joint4',
+                'panda_1_joint5',
+                'panda_1_joint6',
+                'panda_1_joint7']
+
+    # Declare the joint names for the second arm.
+    def jointnames_2(self):
+        return ['panda_2_joint1',
+                'panda_2_joint2',
+                'panda_2_joint3',
+                'panda_2_joint4',
+                'panda_2_joint5',
+                'panda_2_joint6',
+                'panda_2_joint7']
+
+    # Evaluate at the given time.  This was last called (dt) ago.
+    def evaluate(self, t, dt):
+        #### Chain 2 kinematics ###
+        pd_2 = np.array([0.0, 0.0, 1.5])
+        vd_2 = np.zeros(3)
+        Rd_2 = Roty(-np.pi/3)
+        wd_2 = np.zeros(3)
+
+        (qd_2, qddot_2, ptip_2, Rtip_2) = self.ikin(self.chain_2, self.lam_2, dt, self.qd_2, pd_2, vd_2, Rd_2, wd_2)    
+        self.qd_2 = qd_2
+
+        #### chain 1 kinematics ###
+        (phand_2, _, _, _) = self.chain_to_hand_2.fkin(self.qd_2)
+        hand_2_to_hand_1 = ptip_2 - phand_2
+
+        pd_1 = ptip_2 + hand_2_to_hand_1
+        vd_1 = np.zeros(3)
+        Rd_1 = np.array([Rd_2[:, 0], -Rd_2[:, 1], -Rd_2[:, 2]])
+        wd_1 = np.zeros(3)
+
+        (qd_1, qddot_1, _, _) = self.ikin(self.chain_1, self.lam_1, dt, self.qd_1, pd_1, vd_1, Rd_1, wd_1)
+        self.qd_1 = qd_1
+
+        # Return the desired joint and task (position/orientation) pos/vel.
+        qd = np.concatenate((qd_1, qd_2, np.zeros(4)))
+        qddot = np.concatenate((qddot_1, qddot_2, np.zeros(4)))
+        
+        self.vball += dt * self.aball
+        self.pball += dt * self.vball
+
+        # Determine if the ball is in collision with the paddle
+        r = self.pball - ptip_2
+        n = Rtip_2[0:3,0] / np.linalg.norm(Rtip_2[0:3,0])
+        if n @ r < 1e-2 and np.linalg.norm(r) <= self.paddle_radius:
+            v_normal = (self.vball @ n) * n
+            v_plane = self.vball - v_normal
+            self.vball = v_plane - v_normal
+
+        return (qd, qddot, self.pball)
+
+
+    def ikin(self, chain, lam, dt, qd_last, pd, vd, Rd, wd):
+        xddot = np.concatenate((vd, wd))
+        
+        (ptip, Rtip, Jv, Jw) = chain.fkin(qd_last)
+
+        J = np.vstack((Jv, Jw))
+
+        ep_ = ep(pd, ptip)
+        eR_ = eR(Rd, Rtip)
+        error = np.concatenate((ep_, eR_))
+
+        qddot = np.linalg.pinv(J) @ (xddot + lam*error)
+        qd = qd_last + dt*qddot
+
+        return (qd, qddot, ptip, Rtip)
+
+
+#
+#  Main Code
+#
+def main(args=None):
+    # Initialize ROS.
+    rclpy.init(args=args)
+
+    # Initialize the generator node for 100Hz udpates, using the above
+    # Trajectory class.
+    generator = GeneratorNode('dual_arm_generator', 500, Trajectory)
+
+    # Spin, meaning keep running (taking care of the timer callbacks
+    # and message passing), until interrupted or the trajectory ends.
+    generator.spin()
+
+    # Shutdown the node and ROS.
+    generator.shutdown()
+    rclpy.shutdown()
+
+if __name__ == "__main__":
+    main()
